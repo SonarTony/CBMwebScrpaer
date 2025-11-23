@@ -27,7 +27,7 @@ def get_soup(url: str) -> BeautifulSoup:
 def get_team_depth_chart_urls():
     """
     From the main NCAAF depth chart index page, collect all 'Depth Chart' links.
-    No limit now. We will scrape every team.
+    No limit now, we will scrape every team.
     """
     soup = get_soup(INDEX_URL)
 
@@ -43,19 +43,14 @@ def get_team_depth_chart_urls():
 
     links = sorted(set(links))
     print(f"Found {len(links)} team depth chart pages on index")
-
-    # No limiting, return them all
     return links
 
 
-def make_pf_url(team_url: str) -> str:
+def to_canonical_depth_url(team_url: str) -> str:
     """
-    Build the printer friendly URL from a team depth chart URL.
-
-    Example:
-      https://www.ourlads.com/ncaa-football-depth-charts/depth-chart.aspx?s=army&id=90038
-    ->
-      https://www.ourlads.com/ncaa-football-depth-charts/pfdepthchart/army/90038
+    Convert 'depth-chart.aspx?s=air-force&id=89877' into
+    '.../ncaa-football-depth-charts/depth-chart/air-force/89877'
+    so we always hit the main depth chart page.
     """
     parsed = urlparse(team_url)
     path = parsed.path
@@ -66,167 +61,146 @@ def make_pf_url(team_url: str) -> str:
         tid = qs.get("id", [""])[0]
         slug = qs.get("s", [""])[0]
         if slug and tid:
-            return f"{BASE_URL}/ncaa-football-depth-charts/pfdepthchart/{slug}/{tid}"
+            return f"{BASE_URL}/ncaa-football-depth-charts/depth-chart/{slug}/{tid}"
 
-    parts = path.strip("/").split("/")
-    if "depth-chart" in parts:
-        i = parts.index("depth-chart")
-        try:
-            slug = parts[i + 1]
-            tid = parts[i + 2]
-            return f"{BASE_URL}/ncaa-football-depth-charts/pfdepthchart/{slug}/{tid}"
-        except IndexError:
-            pass
-
-    return team_url.replace("depth-chart", "pfdepthchart")
+    return team_url
 
 
-def clean_name_token(token: str) -> str:
-    """Convert a slug like 'brady-anderson' into 'Brady Anderson'."""
-    return token.replace("-", " ").title()
-
-
-def is_position_token(token: str) -> bool:
+def get_team_name(soup: BeautifulSoup) -> str:
     """
-    Decide if a token is a position code (WR, LT, LDE, FS, PK, etc.)
-    vs a player slug ('brady-anderson').
-
-    Heuristic: all letters, all uppercase, no hyphen.
+    Get team name from the main heading that contains 'Depth Chart',
+    for example 'Air Force Falcons Depth Chart' -> 'Air Force Falcons'.
     """
-    return token.isalpha() and token.upper() == token and "-" not in token
+    for h in soup.find_all(["h1", "h2", "h3"]):
+        text = h.get_text(strip=True)
+        if "Depth Chart" in text:
+            return text.replace("Depth Chart", "").strip()
+
+    if soup.title and soup.title.string:
+        text = soup.title.string
+        if "Depth Chart" in text:
+            return text.replace("Depth Chart", "").strip()
+        return text.strip()
+
+    return "Unknown"
 
 
-def parse_pf_page(pf_url: str):
+def find_section_for_table(table: BeautifulSoup) -> str:
     """
-    Parse a printer friendly depth chart page into records using the
-    one-token-per-line format we saw in your debug output.
+    Walk backwards from the table to find the nearest header that names the section.
+
+    We look for heading tags with text containing 'Offense', 'Defense', or 'Special Teams'.
     """
-    print(f"    downloading PF page: {pf_url}")
-    soup = get_soup(pf_url)
-    text = soup.get_text("\n")
+    section = "Unknown"
+    for el in table.find_all_previous():
+        if el.name in ("h1", "h2", "h3", "h4"):
+            text = el.get_text(strip=True).lower()
+            if "offense" in text:
+                section = "Offense"
+                break
+            if "defense" in text:
+                section = "Defense"
+                break
+            if "special teams" in text or "special team" in text:
+                section = "Special Teams"
+                break
+    return section
 
-    # One token per non empty line
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
-    print(f"    got {len(lines)} text lines from PF page")
 
-    # Team name: first line with 'Depth Chart' that is not the generic heading
-    team_name = "Unknown"
-    for line in lines:
-        if "Depth Chart" in line and "Printer-Friendly" not in line:
-            team_name = line.replace("Depth Chart", "").strip().strip("#").strip()
-            break
-    print(f"    team name from PF page: {team_name}")
+def is_depth_chart_table(table: BeautifulSoup) -> bool:
+    """
+    Heuristic: a depth chart table has header cells with 'Pos' and 'Player 1'.
+    """
+    header_row = table.find("tr")
+    if not header_row:
+        return False
 
+    header_text = " ".join(th.get_text(strip=True) for th in header_row.find_all(["th", "td"]))
+    header_text_low = header_text.lower()
+    return ("pos" in header_text_low) and ("player 1" in header_text_low)
+
+
+def parse_depth_table(table: BeautifulSoup, team_name: str, unit_type: str):
+    """
+    Parse a single depth chart table and return starter records.
+
+    We assume columns roughly like:
+      Pos | No. | Player 1 | No | Player 2 | ...
+
+    We only grab:
+      position = col 0
+      jersey   = col 1
+      player   = col 2
+    """
     records = []
-    current_unit = None   # Offense / Defense / Special Teams
-    current_pos = None
-    i = 0
-    n = len(lines)
 
-    header_tokens = {
-        "Pos", "No", "Player", "Player 1", "Player 2",
-        "Player 3", "Player 4", "Player 5"
-    }
+    rows = table.find_all("tr")
+    if not rows or len(rows) < 2:
+        return records
 
-    while i < n:
-        t = lines[i]
-        low = t.lower()
-
-        # Section headers
-        if low == "offense":
-            current_unit = "Offense"
-            current_pos = None
-            i += 1
-            continue
-        if low == "defense":
-            current_unit = "Defense"
-            current_pos = None
-            i += 1
-            continue
-        if low == "special teams":
-            current_unit = "Special Teams"
-            current_pos = None
-            i += 1
+    for row in rows[1:]:
+        cells = row.find_all("td")
+        if not cells:
             continue
 
-        # Ignore until we are inside a section
-        if current_unit is None:
-            i += 1
+        pos = cells[0].get_text(strip=True)
+        if not pos or pos.lower() == "pos":
             continue
 
-        # Skip headers / 'Updated' lines
-        if t in header_tokens or low.startswith("updated"):
-            i += 1
+        if len(cells) < 3:
             continue
 
-        # Detect a new position: uppercase alpha token whose next token is a jersey number
-        if is_position_token(t) and i + 1 < n and lines[i + 1].isdigit():
-            current_pos = t
-            depth = 1
-            i += 2  # move to first jersey after position
+        jersey = cells[1].get_text(strip=True)
+        player = cells[2].get_text(strip=True)
 
-            # Consume jersey/name pairs for this position
-            while i < n:
-                if i >= n:
-                    break
+        if not jersey and not player:
+            continue
 
-                low2 = lines[i].lower()
+        records.append(
+            {
+                "team": team_name,
+                "unit_type": unit_type,
+                "position": pos,
+                "depth": 1,
+                "jersey": jersey,
+                "player": player,
+            }
+        )
 
-                # New section => stop this position
-                if low2 in ("offense", "defense", "special teams"):
-                    break
-
-                # Potential start of a new position => stop this position
-                if is_position_token(lines[i]) and i + 1 < n and lines[i + 1].isdigit():
-                    break
-
-                # Expect a jersey number
-                if not lines[i].isdigit():
-                    i += 1
-                    continue
-
-                jersey = lines[i]
-                i += 1
-                if i >= n:
-                    break
-
-                name_token = lines[i]
-                i += 1
-
-                if name_token in header_tokens or name_token.lower() in ("offense", "defense", "special teams"):
-                    break
-
-                player_name = clean_name_token(name_token)
-
-                records.append(
-                    {
-                        "team": team_name,
-                        "unit_type": current_unit,
-                        "position": current_pos,
-                        "depth": depth,
-                        "jersey": jersey,
-                        "player": player_name,
-                    }
-                )
-                depth += 1
-
-            continue  # skip the i += 1 at the end; we already moved inside the loop
-
-        # Anything else, just advance
-        i += 1
-
-    print(f"    parsed {len(records)} records from PF page")
     return records
 
 
-def parse_team(team_url: str):
-    """Get PF URL for a team and parse its PF depth chart."""
+def parse_team_depth_chart(team_url: str):
+    """
+    For a given team, go to the main depth chart page and parse the
+    Offense / Defense / Special Teams tables, starters only.
+    """
     print(f"\nScraping team index URL: {team_url}")
-    pf_url = make_pf_url(team_url)
-    print(f"  printer-friendly URL: {pf_url}")
-    team_records = parse_pf_page(pf_url)
-    print(f"  Parsed {len(team_records)} records for this team")
-    return team_records
+    depth_url = to_canonical_depth_url(team_url)
+    print(f"  canonical depth chart URL: {depth_url}")
+
+    soup = get_soup(depth_url)
+    team_name = get_team_name(soup)
+    print(f"  detected team name: {team_name}")
+
+    all_records = []
+
+    tables = soup.find_all("table")
+    print(f"  found {len(tables)} tables on page")
+
+    for idx, table in enumerate(tables):
+        if not is_depth_chart_table(table):
+            continue
+
+        unit_type = find_section_for_table(table)
+        print(f"  parsing table {idx} as {unit_type}")
+
+        table_records = parse_depth_table(table, team_name, unit_type)
+        print(f"    parsed {len(table_records)} starter records from this table")
+        all_records.extend(table_records)
+
+    print(f"  total {len(all_records)} starter records for this team")
+    return all_records
 
 
 def main():
@@ -237,13 +211,13 @@ def main():
     for idx, url in enumerate(team_urls, start=1):
         print(f"\n=== Team {idx} of {len(team_urls)} ===")
         try:
-            team_records = parse_team(url)
+            team_records = parse_team_depth_chart(url)
             all_records.extend(team_records)
         except Exception as e:
             print(f"ERROR on {url}: {e}")
         time.sleep(1)  # be polite to the site
 
-    output_file = "ncaaf_depth_charts_ourlads.csv"
+    output_file = "ncaaf_depth_charts_starters_only_tables.csv"
     fieldnames = ["team", "unit_type", "position", "depth", "jersey", "player"]
 
     with open(output_file, "w", newline="", encoding="utf-8") as f:
@@ -257,6 +231,9 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+
 
 
 

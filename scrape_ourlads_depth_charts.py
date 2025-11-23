@@ -27,7 +27,7 @@ def get_soup(url: str) -> BeautifulSoup:
 def get_team_depth_chart_urls():
     """
     From the main NCAAF depth chart index page, collect all 'Depth Chart' links.
-    Limit to the first 10 teams while we debug.
+    No limit now. We will scrape every team.
     """
     soup = get_soup(INDEX_URL)
 
@@ -44,12 +44,8 @@ def get_team_depth_chart_urls():
     links = sorted(set(links))
     print(f"Found {len(links)} team depth chart pages on index")
 
-    limited_links = links[:10]
-    print("Limiting scrape to these team URLs:")
-    for u in limited_links:
-        print("  ", u)
-
-    return limited_links
+    # No limiting, return them all
+    return links
 
 
 def make_pf_url(team_url: str) -> str:
@@ -94,6 +90,7 @@ def is_position_token(token: str) -> bool:
     """
     Decide if a token is a position code (WR, LT, LDE, FS, PK, etc.)
     vs a player slug ('brady-anderson').
+
     Heuristic: all letters, all uppercase, no hyphen.
     """
     return token.isalpha() and token.upper() == token and "-" not in token
@@ -101,18 +98,18 @@ def is_position_token(token: str) -> bool:
 
 def parse_pf_page(pf_url: str):
     """
-    Parse a printer-friendly depth chart page into records using the
-    one-token-per-line format you showed.
+    Parse a printer friendly depth chart page into records using the
+    one-token-per-line format we saw in your debug output.
     """
     print(f"    downloading PF page: {pf_url}")
     soup = get_soup(pf_url)
     text = soup.get_text("\n")
 
-    # One token per non-empty line
+    # One token per non empty line
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     print(f"    got {len(lines)} text lines from PF page")
 
-    # Team name: first line with 'Depth Chart' that isn't the generic heading
+    # Team name: first line with 'Depth Chart' that is not the generic heading
     team_name = "Unknown"
     for line in lines:
         if "Depth Chart" in line and "Printer-Friendly" not in line:
@@ -213,7 +210,7 @@ def parse_pf_page(pf_url: str):
                 )
                 depth += 1
 
-            continue  # don't i += 1 here; we already advanced inside the loop
+            continue  # skip the i += 1 at the end; we already moved inside the loop
 
         # Anything else, just advance
         i += 1
@@ -237,13 +234,14 @@ def main():
 
     all_records = []
 
-    for url in team_urls:
+    for idx, url in enumerate(team_urls, start=1):
+        print(f"\n=== Team {idx} of {len(team_urls)} ===")
         try:
             team_records = parse_team(url)
             all_records.extend(team_records)
         except Exception as e:
             print(f"ERROR on {url}: {e}")
-        time.sleep(1)  # be polite
+        time.sleep(1)  # be polite to the site
 
     output_file = "ncaaf_depth_charts_ourlads.csv"
     fieldnames = ["team", "unit_type", "position", "depth", "jersey", "player"]
@@ -259,6 +257,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 

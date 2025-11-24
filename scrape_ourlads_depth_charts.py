@@ -27,7 +27,7 @@ def get_soup(url: str) -> BeautifulSoup:
 def get_team_depth_chart_urls():
     """
     From the main NCAAF depth chart index page, collect all 'Depth Chart' links.
-    No limit now, we will scrape every team.
+    We scrape every team.
     """
     soup = get_soup(INDEX_URL)
 
@@ -120,6 +120,25 @@ def is_depth_chart_table(table: BeautifulSoup) -> bool:
     return ("pos" in header_text_low) and ("player 1" in header_text_low)
 
 
+def extract_last_name(full_name: str) -> str:
+    """
+    Given a full name like 'Smith, Quin SR', return just the last name 'Smith'.
+
+    Rules:
+      - If there's a comma, take everything before the comma.
+      - Otherwise, take the last word.
+    """
+    full_name = full_name.strip()
+    if not full_name:
+        return ""
+
+    if "," in full_name:
+        return full_name.split(",")[0].strip()
+
+    parts = full_name.split()
+    return parts[-1].strip() if parts else ""
+
+
 def parse_depth_table(table: BeautifulSoup, team_name: str, unit_type: str):
     """
     Parse a single depth chart table and return starter records.
@@ -130,7 +149,7 @@ def parse_depth_table(table: BeautifulSoup, team_name: str, unit_type: str):
     We only grab:
       position = col 0
       jersey   = col 1
-      player   = col 2
+      player   = col 2 (but stored as LAST NAME only)
     """
     records = []
 
@@ -151,19 +170,21 @@ def parse_depth_table(table: BeautifulSoup, team_name: str, unit_type: str):
             continue
 
         jersey = cells[1].get_text(strip=True)
-        player = cells[2].get_text(strip=True)
+        full_player = cells[2].get_text(strip=True)
 
-        if not jersey and not player:
+        if not jersey and not full_player:
             continue
+
+        last_name = extract_last_name(full_player)
 
         records.append(
             {
                 "team": team_name,
                 "unit_type": unit_type,
                 "position": pos,
-                "depth": 1,
+                "depth": 1,          # starter
                 "jersey": jersey,
-                "player": player,
+                "player": last_name,  # only last name
             }
         )
 
@@ -231,6 +252,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
